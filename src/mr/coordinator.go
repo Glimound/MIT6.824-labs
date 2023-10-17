@@ -64,6 +64,7 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 
 		c.files = c.files[1:]
 		c.mapTaskCounter++
+		log.Printf("分配map任务，taskNum: %v\n", reply.TaskNum)
 	} else {
 		allDone := true
 		// 遍历任务列表，检查是否所有的map任务都已经完成
@@ -81,6 +82,7 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 				reply.NReduce = c.nReduce
 				reply.IsMapTask = true
 				reply.TaskNum = v.taskNum
+				log.Printf("重新分配map任务，taskNum: %v\n", reply.TaskNum)
 				break
 			}
 		}
@@ -102,6 +104,7 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 				reply.TaskNum = c.reduceTaskCounter
 
 				c.reduceTaskCounter++
+				log.Printf("分配reduce任务，taskNum: %v\n", reply.TaskNum)
 			} else {
 				// 遍历任务列表，检查是否存在崩溃任务，若有则重新分配崩溃任务
 				for _, v := range c.reduceTasks {
@@ -113,12 +116,16 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 						reply.MMap = c.mapTaskCounter
 						reply.IsMapTask = false
 						reply.TaskNum = v.taskNum
+						log.Printf("重新分配reduce任务，taskNum: %v\n", reply.TaskNum)
 						return nil
 					}
 				}
 				// 若已分配完且不存在崩溃，则返回等待指令
 				reply.Wait = true
 			}
+		} else {
+			// 仍有map任务未完成，返回等待指令
+			reply.Wait = true
 		}
 	}
 	return nil
@@ -131,9 +138,11 @@ func (c *Coordinator) HandleFinishTaskRequest(args *FinishTaskArgs, reply *Finis
 	defer mutex.Unlock()
 
 	if args.IsMapTask {
-		c.mapTasks[args.taskNum].done = true
+		c.mapTasks[args.TaskNum].done = true
+		log.Printf("map任务完成，taskNum: %v\n", args.TaskNum)
 	} else {
-		c.reduceTasks[args.taskNum].done = true
+		c.reduceTasks[args.TaskNum].done = true
+		log.Printf("reduce任务完成，taskNum: %v\n", args.TaskNum)
 	}
 
 	return nil
@@ -209,8 +218,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceTasks:       make([]ReduceTaskInfo, 0),
 	}
 
-	// Your code here.
-
 	c.server()
+	go c.timeoutChecker()
+
 	return &c
 }

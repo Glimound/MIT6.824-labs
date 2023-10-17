@@ -24,7 +24,7 @@ type GetTaskReply struct {
 }
 
 type FinishTaskArgs struct {
-	taskNum   int
+	TaskNum   int
 	IsMapTask bool
 }
 
