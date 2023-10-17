@@ -37,7 +37,10 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	for {
-		reply := getTaskCall()
+		reply, err := getTaskCall()
+		if err {
+			return
+		}
 		// 若无可分配任务，则等待
 		if reply.Wait {
 			log.Println("无可获取任务，等待中")
@@ -74,6 +77,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 				// 以json格式写入至临时文件中
 				for _, kv := range intermediate {
+					// 通过对key进行hash操作，选取合适的位置存储
 					encoderMapping[ihash(kv.Key)%reply.NReduce].Encode(&kv)
 				}
 				for i, tmpFile := range fileMapping {
@@ -148,12 +152,14 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 // 向远程Coordinate发送RPC请求，获取任务
-func getTaskCall() GetTaskReply {
+func getTaskCall() (GetTaskReply, bool) {
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
-	call("Coordinator.HandleGetTaskRequest", &args, &reply)
-	log.Printf("获取任务，rpc reply: %+v\n", reply)
-	return reply
+	err := !call("Coordinator.HandleGetTaskRequest", &args, &reply)
+	if !reply.Wait {
+		log.Printf("获取任务，rpc reply: %+v\n", reply)
+	}
+	return reply, err
 }
 
 // 向远程Coordinate发送请求，通知任务已完成

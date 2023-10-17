@@ -69,21 +69,24 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 		allDone := true
 		// 遍历任务列表，检查是否所有的map任务都已经完成
 		// 同时检查是否存在崩溃任务，若有则重新分配崩溃任务
-		for _, v := range c.mapTasks {
+		for i, v := range c.mapTasks {
 			if !v.done {
 				allDone = false
 			}
 			if v.crash {
 				// 重新设置任务状态及时间
-				v.crash = false
-				v.startTime = time.Now()
+				// 错误示例：
+				// v.crash = false
+				// v.startTime = time.Now()
+				c.mapTasks[i].crash = false
+				c.mapTasks[i].startTime = time.Now()
 
 				reply.FileName = v.fileName
 				reply.NReduce = c.nReduce
 				reply.IsMapTask = true
 				reply.TaskNum = v.taskNum
 				log.Printf("重新分配map任务，taskNum: %v\n", reply.TaskNum)
-				break
+				return nil
 			}
 		}
 		// 若所有map任务都已完成
@@ -107,11 +110,11 @@ func (c *Coordinator) HandleGetTaskRequest(args *GetTaskArgs, reply *GetTaskRepl
 				log.Printf("分配reduce任务，taskNum: %v\n", reply.TaskNum)
 			} else {
 				// 遍历任务列表，检查是否存在崩溃任务，若有则重新分配崩溃任务
-				for _, v := range c.reduceTasks {
+				for i, v := range c.reduceTasks {
 					if v.crash {
 						// 重新设置任务状态及时间
-						v.crash = false
-						v.startTime = time.Now()
+						c.reduceTasks[i].crash = false
+						c.reduceTasks[i].startTime = time.Now()
 
 						reply.MMap = c.mapTaskCounter
 						reply.IsMapTask = false
@@ -189,14 +192,22 @@ func (c *Coordinator) Done() bool {
 func (c *Coordinator) timeoutChecker() {
 	for {
 		mutex.Lock()
-		for _, task := range c.mapTasks {
+		// !!坑：for range循环中的value（预声明的迭代变量）为唯一地址的数据副本，无法修改原数据
+		for index, task := range c.mapTasks {
+			if !task.done {
+				log.Println("map任务", task.taskNum, "已执行时间：", time.Now().Sub(task.startTime))
+			}
 			if !task.done && time.Now().Sub(task.startTime) > time.Second*10 {
-				task.crash = true
+				c.mapTasks[index].crash = true
+				// 错误示例：task.crash = true
 			}
 		}
-		for _, task := range c.reduceTasks {
+		for index, task := range c.reduceTasks {
+			if !task.done {
+				log.Println("reduce任务", task.taskNum, "已执行时间：", time.Now().Sub(task.startTime))
+			}
 			if !task.done && time.Now().Sub(task.startTime) > time.Second*10 {
-				task.crash = true
+				c.reduceTasks[index].crash = true
 			}
 		}
 		mutex.Unlock()
