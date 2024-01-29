@@ -376,7 +376,6 @@ func (rf *Raft) ticker() {
 				break
 			}
 			rf.mu.Unlock()
-			// TODO: 优化此处超时判断机制
 			time.Sleep(30 * time.Millisecond)
 		}
 		// 自增任期
@@ -410,29 +409,10 @@ func (rf *Raft) ticker() {
 					if copyTerm == rf.currentTerm {
 						// 转换为leader，且无需修改voted（任期没变）
 						rf.currentRole = leader
-						// 向所有其他节点定期发送AppendEntries RPC
+						// 向所有其他节点定期发送空的AppendEntries RPC（心跳）
 						for j := range rf.peers {
 							if j != rf.me {
-								go func(index int) {
-									for {
-										// 若当前不再是leader，跳出循环
-										rf.mu.Lock()
-										if rf.currentRole != leader {
-											rf.mu.Unlock()
-											break
-										}
-										rf.mu.Unlock()
-
-										// 初始化args和reply
-										args := AppendEntriesArgs{}
-										// TODO: 此处隐含一问题，rf.me会不会在运行过程中发生变化？此处未加锁
-										args.LeaderId = rf.me
-										args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
-										reply := AppendEntriesReply{}
-										go rf.sendAppendEntries(index, &args, &reply) // 此处使用goroutine，防止网络延迟导致心跳发送不规律
-										time.Sleep(100 * time.Millisecond)
-									}
-								}(j)
+								go rf.heartbeatTicker(j, copyTerm)
 							}
 						}
 					}
@@ -465,6 +445,32 @@ func (rf *Raft) ticker() {
 		wg.Wait()
 		close(counterChan)
 	}
+}
+
+// 向指定节点定期发送心跳
+func (rf *Raft) heartbeatTicker(index int, copyTerm int) {
+	for {
+		// 若当前不再是leader，跳出循环
+		rf.mu.Lock()
+		if rf.currentRole != leader {
+			rf.mu.Unlock()
+			break
+		}
+		rf.mu.Unlock()
+
+		// 初始化args和reply
+		args := AppendEntriesArgs{}
+		// TODO: 此处隐含一问题，rf.me会不会在运行过程中发生变化？此处未加锁
+		args.LeaderId = rf.me
+		args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
+		reply := AppendEntriesReply{}
+		go rf.sendAppendEntries(index, &args, &reply) // 此处使用goroutine，防止网络延迟导致心跳发送不规律
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (rf *Raft) candidateTicker() {
+
 }
 
 // the service or tester wants to create a Raft server. the ports
