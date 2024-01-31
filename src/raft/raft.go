@@ -38,8 +38,8 @@ const (
 
 // 超时期限（ms）
 const (
-	timeoutMin = 800
-	timeoutMax = 1000
+	timeoutMin = 600
+	timeoutMax = 800
 )
 
 // as each Raft peer becomes aware that successive log entries are
@@ -179,6 +179,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 处理请求投票逻辑
 	// 若接收到的term比当前的大
 	if args.Term > rf.currentTerm {
+		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.currentTerm)
 		// 设置term并转换为follower
 		rf.currentTerm = args.Term
 		rf.currentRole = follower
@@ -190,6 +191,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 投拒绝票
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.currentTerm)
 	} else {
 		// 等于的情况（可能为转换而来的相等，或是原本就相等）
 		// 对于term相等的情况的讨论：若当前为follower，不影响；
@@ -199,6 +201,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// TODO: 此处在后续需添加其余的逻辑判断，当前不涉及日志的处理逻辑
 		if !rf.voted || rf.votedFor == args.CandidateId {
 			// 投通过票
+			DPrintf(dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.currentTerm)
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			rf.voted = true
@@ -208,6 +211,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
+			DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.currentTerm)
 		}
 	}
 	rf.mu.Unlock()
@@ -248,6 +252,7 @@ func (rf *Raft) sendRequestVote(server int, c chan<- int, args *RequestVoteArgs,
 		// 处理接收投票逻辑
 		// 若接收到的term比当前的大
 		if reply.Term > rf.currentTerm {
+			DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.currentTerm)
 			// 设置term并转换为follower
 			rf.currentTerm = reply.Term
 			rf.currentRole = follower
@@ -257,6 +262,7 @@ func (rf *Raft) sendRequestVote(server int, c chan<- int, args *RequestVoteArgs,
 		rf.mu.Unlock()
 		// 若接收到有效投票
 		if reply.VoteGranted {
+			DPrintf(dTerm, "S%d <- S%d Got vote for T%d", rf.me, server, args.Term)
 			// 向counterChan中发送信号
 			c <- 1
 		}
@@ -285,19 +291,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 若接收到的term比当前的大
 	if args.Term > rf.currentTerm {
 		// 设置term并转换为follower
+		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		rf.currentRole = follower
 		rf.voted = false
 	}
-	rf.lastHeartbeatTime = time.Now()
 
+	// 注意：收到来自term比自己小的leader的心跳，不要重置election timer，防止错误的leader持续工作
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		DPrintf(dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
+	} else {
+		reply.Success = false
+		DPrintf(dTimer, "S%d receive valid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
+		rf.lastHeartbeatTime = time.Now()
+	}
 	reply.Term = rf.currentTerm
-	reply.Success = true
 	rf.mu.Unlock()
 }
 
 // 发送AppendEntries RPC并处理回复（Leader）
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf(dLog1, "S%d -> S%d Sending AppendEntries RPC", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	// TODO: 此处在后续需添加其余的逻辑判断，当前只有心跳的处理逻辑
 	if ok {
@@ -306,6 +321,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		// 若接收到的term比当前的大
 		if reply.Term > rf.currentTerm {
 			// 设置term并转换为follower
+			DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.currentTerm)
 			rf.currentTerm = reply.Term
 			rf.currentRole = follower
 			rf.lastHeartbeatTime = time.Now()
@@ -369,9 +385,13 @@ func (rf *Raft) ticker() {
 		timeout := timeoutMin + rand.Int63n(timeoutMax-timeoutMin)
 		// 循环直到超时
 		for {
+			// 检查当前是否被kill
+			if rf.killed() {
+				return
+			}
 			rf.mu.Lock()
 			// 超时且当前不为leader
-			if time.Now().Sub(rf.lastHeartbeatTime).Milliseconds() > timeout && rf.currentRole != leader {
+			if time.Since(rf.lastHeartbeatTime).Milliseconds() > timeout && rf.currentRole != leader {
 				// 此处本应有的unlock后移至函数末尾，以便在同一个lock中完成所有操作
 				break
 			}
@@ -386,6 +406,8 @@ func (rf *Raft) ticker() {
 		rf.votedFor = rf.me
 		// 重置计时器
 		rf.lastHeartbeatTime = time.Now()
+
+		DPrintf(dTimer, "S%d Election timeout, become candidate for T%d", rf.me, rf.currentTerm)
 
 		// 保存currentTerm的副本
 		tmpTerm := rf.currentTerm
@@ -408,8 +430,11 @@ func (rf *Raft) ticker() {
 					// 若选举结果出来后还是当前任期
 					if copyTerm == rf.currentTerm {
 						// 转换为leader，且无需修改voted（任期没变）
+						DPrintf(dLeader, "S%d Achieved majority for T%d (%d), converting to leader", rf.me, rf.currentTerm, counter)
 						rf.currentRole = leader
 						// 向所有其他节点定期发送空的AppendEntries RPC（心跳）
+						// leader身份快速转变时（leader -> ? -> leader）会存在两个相同的heartbeat goroutine吗？不会。
+						// leader能且只能因收到更大的term转换为follower，不可能在heartbeat timeout间完成候选与选举
 						for j := range rf.peers {
 							if j != rf.me {
 								go rf.heartbeatTicker(j, copyTerm)
@@ -424,6 +449,7 @@ func (rf *Raft) ticker() {
 		}(len(rf.peers), counterChan, tmpTerm)
 
 		// 向所有其他节点发送请求投票RPC
+		DPrintf(dVote, "S%d Requesting vote", rf.me)
 		for i := range rf.peers {
 			if i != rf.me {
 				go func(copyTerm int, c chan<- int, index int) {
@@ -441,15 +467,20 @@ func (rf *Raft) ticker() {
 		}
 		rf.mu.Unlock()
 
-		// 等待所有投票处理完后，关闭channel
-		wg.Wait()
-		close(counterChan)
+		// 创建收尾goroutine，等待所有投票处理完后，关闭channel
+		// 坑：若不创建goroutine，candidate在等待选举的情况下，其timeout时间会远超预期（等待waitgroup）
+		go func() {
+			wg.Wait()
+			close(counterChan)
+		}()
 	}
 }
 
 // 向指定节点定期发送心跳
 func (rf *Raft) heartbeatTicker(index int, copyTerm int) {
-	for {
+	// 坑：某个server被kill之后，ticker goroutine仍在运行，出现无限发送心跳等情况
+	// 故还需检查是否已被kill
+	for rf.killed() == false {
 		// 若当前不再是leader，跳出循环
 		rf.mu.Lock()
 		if rf.currentRole != leader {
@@ -467,10 +498,6 @@ func (rf *Raft) heartbeatTicker(index int, copyTerm int) {
 		go rf.sendAppendEntries(index, &args, &reply) // 此处使用goroutine，防止网络延迟导致心跳发送不规律
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-func (rf *Raft) candidateTicker() {
-
 }
 
 // the service or tester wants to create a Raft server. the ports

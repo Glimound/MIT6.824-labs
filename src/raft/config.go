@@ -83,6 +83,8 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 
 	cfg.net.LongDelays(true)
 
+	DebugInit()
+
 	applier := cfg.applier
 	if snapshot {
 		applier = cfg.applierSnap
@@ -230,13 +232,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	}
 }
 
-//
 // start or re-start a Raft.
 // if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
-//
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
 
