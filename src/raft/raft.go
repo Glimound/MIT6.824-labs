@@ -202,6 +202,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastHeartbeatTime = time.Now()
 		rf.voted = false
 	}
+	// TODO: term比自己大但投了拒绝票，不应该重置election timeout
 	// 若接收到的term比当前的小（不是小于等于）
 	if args.Term < rf.currentTerm {
 		// 投拒绝票
@@ -346,9 +347,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		DPrintf(dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
-	} else if args.PrevLogIndex != 0 && (args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		// 前一个index为0：第一项日志条目或leader的心跳，此时必定成功，不会进入该分支
-		// 在前一个index不为0的情况下，index大于当前日志长度或条目不匹配，则进入该分支，返回false，等待leader重新发送
+	} else if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		// index大于当前日志长度或条目不匹配，则进入该分支，返回false，等待leader重新发送
+		// 心跳：index和term均为0，此时必定成功，不会进入该分支
 		reply.Success = false
 		DPrintf(dTimer, "S%d receive mismatched AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 		rf.lastHeartbeatTime = time.Now()
@@ -379,8 +380,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	// 根据leader的commitIndex来更新自己的commitIndex
-	if args.LeaderCommit > rf.commitIndex {
+	// 若未失败，根据leader的commitIndex来更新自己的commitIndex
+	if reply.Success && args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit < len(rf.log)-1 {
 			rf.commitIndex = args.LeaderCommit
 		} else {
@@ -707,7 +708,7 @@ func (rf *Raft) checkMajority(nodeNum int, c <-chan int, copyTerm int) {
 }
 
 // 向指定节点定期发送心跳
-func (rf *Raft) heartbeatTicker(index int, copyTerm int) {
+func (rf *Raft) heartbeatTicker(server int, copyTerm int) {
 	// 坑：某个server被kill之后，ticker goroutine仍在运行，出现无限发送心跳等情况
 	// 故还需检查是否已被kill
 	for rf.killed() == false {
@@ -718,15 +719,36 @@ func (rf *Raft) heartbeatTicker(index int, copyTerm int) {
 			break
 		}
 
-		// 初始化args和reply
-		args := AppendEntriesArgs{}
-		// TODO: 此处隐含一问题，rf.me会不会在运行过程中发生变化？此处未加锁
-		args.LeaderId = rf.me
-		args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
-		args.LeaderCommit = rf.commitIndex
-		reply := AppendEntriesReply{}
-
-		go rf.sendAppendEntries(index, &args, &reply) // 此处使用goroutine，防止网络延迟导致心跳发送不规律
+		// 发送心跳，并完成一致性检查
+		go func() {
+			for i := 0; !rf.killed(); i++ {
+				rf.mu.Lock()
+				if rf.currentRole != leader {
+					rf.mu.Unlock()
+					return
+				}
+				index := len(rf.log) - 1 // 最后一个entry的index
+				// 初始化args和reply
+				args := AppendEntriesArgs{}
+				args.LeaderId = rf.me
+				args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
+				args.LeaderCommit = rf.commitIndex
+				args.PrevLogIndex = index - i
+				args.PrevLogTerm = rf.log[index-i].Term
+				args.Entries = rf.log[index-i+1:] // 最后i个entries，i为0的时候为空切片（心跳）
+				reply := AppendEntriesReply{}
+				rf.mu.Unlock()
+				ok, success := rf.sendAppendEntries(server, &args, &reply)
+				if !ok {
+					break
+				} else {
+					if success {
+						break
+					}
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
 		rf.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
