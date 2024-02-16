@@ -15,6 +15,8 @@ const (
 	dTerm   logTopic = "TERM"
 	dTimer  logTopic = "TIMR"
 	dVote   logTopic = "VOTE"
+	dLog2   logTopic = "LOG2"
+	dTest   logTopic = "TEST"
 )
 
 const Debug = true
