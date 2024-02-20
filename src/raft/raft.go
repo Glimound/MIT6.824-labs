@@ -91,6 +91,8 @@ type Raft struct {
 	nextIndex   []int         // 每个节点的下一个日志复制的位置index（仅leader 易失）
 	matchIndex  []int         // 每个节点的最高已复制日志的index（仅leader 易失 单调递增）
 	applyCh     chan ApplyMsg // 与client通信的管道
+	cond        *sync.Cond    // 用于控制当前是否该开启log replicate的条件变量
+	logSending  bool          // 指示当前是否有log replicate正在执行
 }
 
 type LogEntry struct {
@@ -199,10 +201,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 设置term并转换为follower
 		rf.currentTerm = args.Term
 		rf.currentRole = follower
-		rf.lastHeartbeatTime = time.Now()
 		rf.voted = false
 	}
-	// TODO: term比自己大但投了拒绝票，不应该重置election timeout
+	// 坑: term比自己大但投了拒绝票，不应该重置election timeout，否则可能会导致日志陈旧的节点阻止日志较新节点开启选举
+	// 若恰好日志陈旧的节点的超时时间比其他节点超时时间都短，则会陷入死循环
 	// 若接收到的term比当前的小（不是小于等于）
 	if args.Term < rf.currentTerm {
 		// 投拒绝票
@@ -349,7 +351,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf(dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 	} else if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// index大于当前日志长度或条目不匹配，则进入该分支，返回false，等待leader重新发送
-		// 心跳：index和term均为0，此时必定成功，不会进入该分支
+		// log为空时：index和term均为0，此时必定成功，不会进入该分支
 		reply.Success = false
 		DPrintf(dTimer, "S%d receive mismatched AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 		rf.lastHeartbeatTime = time.Now()
@@ -454,12 +456,39 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.currentRole == leader
 
 	if isLeader {
-		DPrintf(dLog1, "S%d receive new command (%v), start log(I%d) replicate", rf.me, command, index)
-
+		DPrintf(dLog1, "S%d receive new command (%v) at, I%d", rf.me, command, index)
 		entry := LogEntry{command, term}
 		rf.log = append(rf.log, entry)
-		copyTerm := rf.currentTerm
 		DPrintf(dLog2, "S%d new log: %s", rf.me, EntriesToString(rf.log))
+		rf.cond.Broadcast()
+	}
+	rf.mu.Unlock()
+
+	return index, term, isLeader
+}
+
+// 用于发送日志给follower
+// 合并部分log，不会再每收到一次command就调用一次完整的日志复制操作
+// 防止收到并发的command时，有冗余的sendLogEntries运行的情况
+func (rf *Raft) logSender() {
+	for {
+		rf.mu.Lock()
+		// 开始复制日志的三个条件：当前是leader，有新条目可以发送，没有正在发送的条目
+		// 任一条件不满足则会等待
+		for rf.currentRole != leader || len(rf.log)-1 <= rf.commitIndex || rf.logSending {
+			rf.cond.Wait()
+			if rf.killed() {
+				rf.mu.Unlock()
+				return
+			}
+		}
+
+		rf.logSending = true
+		// 要发送的log entry的index
+		index := len(rf.log) - 1
+		copyTerm := rf.currentTerm
+
+		DPrintf(dLog1, "S%d start replicating entry at I%d", rf.me, index)
 
 		// 创建用于goroutine间通信的channel；创建WaitGroup，以使所有操作完成后关闭channel
 		counterChan := make(chan int, len(rf.peers))
@@ -481,10 +510,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			wg.Wait()
 			close(counterChan)
 		}()
-	}
-	rf.mu.Unlock()
 
-	return index, term, isLeader
+		rf.mu.Unlock()
+	}
 }
 
 // 根据entries复制的结果推进commitIndex
@@ -503,6 +531,8 @@ func (rf *Raft) checkCommit(nodeNum int, c <-chan int, index int) {
 				rf.commitIndex = index
 			}
 			DPrintf(dLog2, "S%d change commitIndex to I%d", rf.me, rf.commitIndex)
+			rf.logSending = false
+			rf.cond.Broadcast()
 			rf.mu.Unlock()
 			// 已过半，停止循环读取channel，结束该goroutine
 			break
@@ -523,6 +553,9 @@ func (rf *Raft) applier() {
 			rf.applyCh <- msg
 			rf.lastApplied++
 			DPrintf(dLog2, "S%d applied (%v,I%d)", rf.me, msg.Command, msg.CommandIndex)
+			// 快速重试，防止有entries等待apply
+			rf.mu.Unlock()
+			continue
 		}
 		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
@@ -566,7 +599,6 @@ func (rf *Raft) sendLogEntries(server int, copyTerm int, wg *sync.WaitGroup, c c
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
 	}
 	wg.Done()
 }
@@ -785,6 +817,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	// 坑：注意初始化applyCh
 	rf.applyCh = applyCh
+	rf.cond = sync.NewCond(&rf.mu)
+
+	// 启动log复制goroutine
+	go rf.logSender()
 
 	go rf.applier()
 
