@@ -2,7 +2,7 @@
 # 批量测试脚本
 
 # 测试次数
-num_tests=10
+num_tests=100
 # 测试脚本
 name_test="2B"
 

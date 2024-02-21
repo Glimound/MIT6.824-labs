@@ -421,8 +421,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		rf.mu.Unlock()
 	}
 	return ok, success
-
-	// TODO: 是否需要反复重试？
 }
 
 func EntriesToString(entries []LogEntry) string {
@@ -475,6 +473,7 @@ func (rf *Raft) logSender() {
 		rf.mu.Lock()
 		// 开始复制日志的三个条件：当前是leader，有新条目可以发送，没有正在发送的条目
 		// 任一条件不满足则会等待
+		// 坑：logSending不会转为false：counterChan接收的投票因部分node killed所以始终达不到半数
 		for rf.currentRole != leader || len(rf.log)-1 <= rf.commitIndex || rf.logSending {
 			rf.cond.Wait()
 			if rf.killed() {
@@ -484,6 +483,18 @@ func (rf *Raft) logSender() {
 		}
 
 		rf.logSending = true
+		// 为logSending设置timeout，若超时且当前复制过程仍未结束，则置为false
+		// 此处是为了防止网络请求的时间长，不可避免会有长时间等待，导致logSending缓慢改变->下一次日志复制等待很久
+		go func(copyCommitIndex int) {
+			time.Sleep(100 * time.Millisecond)
+			rf.mu.Lock()
+			// 此时commit可能已经前进（在commit过半时已经置为false，开始了下一轮复制），则不再置false
+			if copyCommitIndex == rf.commitIndex {
+				rf.logSending = false
+			}
+			rf.mu.Unlock()
+		}(rf.commitIndex)
+
 		// 要发送的log entry的index
 		index := len(rf.log) - 1
 		copyTerm := rf.currentTerm
@@ -501,7 +512,7 @@ func (rf *Raft) logSender() {
 		// 向各个节点发送日志条目
 		for i := range rf.peers {
 			if i != rf.me {
-				go rf.sendLogEntries(i, copyTerm, &wg, counterChan)
+				go rf.sendLogEntries(i, copyTerm, index, &wg, counterChan)
 			}
 		}
 
@@ -510,7 +521,6 @@ func (rf *Raft) logSender() {
 			wg.Wait()
 			close(counterChan)
 		}()
-
 		rf.mu.Unlock()
 	}
 }
@@ -562,18 +572,17 @@ func (rf *Raft) applier() {
 	}
 }
 
-func (rf *Raft) sendLogEntries(server int, copyTerm int, wg *sync.WaitGroup, c chan<- int) {
+func (rf *Raft) sendLogEntries(server int, copyTerm int, index int, wg *sync.WaitGroup, c chan<- int) {
 	for i := 0; !rf.killed(); i++ {
 		rf.mu.Lock()
-		if rf.currentRole != leader {
+		if rf.currentRole != leader || rf.currentTerm != copyTerm {
 			rf.mu.Unlock()
-			return
+			break
 		}
 		// 若有需要发送的日志条目
 		if len(rf.log) > rf.nextIndex[server] {
 			// 初始化args和reply
 			// 此时的index为已经append新条目之后的index
-			index := len(rf.log) - 1
 			args := AppendEntriesArgs{}
 			args.LeaderId = rf.me
 			args.Term = copyTerm
@@ -724,8 +733,9 @@ func (rf *Raft) checkMajority(nodeNum int, c <-chan int, copyTerm int) {
 				}
 				rf.matchIndex = make([]int, len(rf.peers))
 				// 向所有其他节点定期发送空的AppendEntries RPC（心跳）
-				// leader身份快速转变时（leader -> ? -> leader）会存在两个相同的heartbeat goroutine吗？不会。
-				// leader能且只能因收到更大的term转换为follower，不可能在heartbeat timeout间完成候选与选举
+				// leader身份快速转变时（leader -> ? -> leader）会存在两个相同的heartbeat goroutine吗？会，且旧的goroutine
+				// 错误F：leader能且只能因收到更大的term转换为follower，不可能在heartbeat timeout间完成候选与选举
+				// 正确T：leader转为follower，但未给candidate投同意票，随后马上超时，成为下一任leader
 				for j := range rf.peers {
 					if j != rf.me {
 						go rf.heartbeatTicker(j, copyTerm)
@@ -745,42 +755,47 @@ func (rf *Raft) heartbeatTicker(server int, copyTerm int) {
 	// 故还需检查是否已被kill
 	for rf.killed() == false {
 		// 若当前不再是leader，跳出循环
+		// 坑：leader快速变换身份，又迅速转变回leader，导致重复的heartbeatTicker运行
+		// 故还需检查任期是否为创建时的任期
 		rf.mu.Lock()
-		if rf.currentRole != leader {
+		if rf.currentRole != leader || rf.currentTerm != copyTerm {
 			rf.mu.Unlock()
 			break
 		}
 
-		// 发送心跳，并完成一致性检查
-		go func() {
-			for i := 0; !rf.killed(); i++ {
-				rf.mu.Lock()
-				if rf.currentRole != leader {
+		// 若当前没有日志在发送（防止冗余的一致性同步）
+		if !rf.logSending {
+			// 发送心跳，并完成一致性检查
+			go func() {
+				for i := 0; !rf.killed(); i++ {
+					rf.mu.Lock()
+					if rf.currentRole != leader {
+						rf.mu.Unlock()
+						return
+					}
+					index := len(rf.log) - 1 // 最后一个entry的index
+					// 初始化args和reply
+					args := AppendEntriesArgs{}
+					args.LeaderId = rf.me
+					args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
+					args.LeaderCommit = rf.commitIndex
+					args.PrevLogIndex = index - i
+					args.PrevLogTerm = rf.log[index-i].Term
+					args.Entries = rf.log[index-i+1:] // 最后i个entries，i为0的时候为空切片（心跳）
+					reply := AppendEntriesReply{}
 					rf.mu.Unlock()
-					return
-				}
-				index := len(rf.log) - 1 // 最后一个entry的index
-				// 初始化args和reply
-				args := AppendEntriesArgs{}
-				args.LeaderId = rf.me
-				args.Term = copyTerm // 不能简单地使用rf.currentTerm，因为可能已经发生改变
-				args.LeaderCommit = rf.commitIndex
-				args.PrevLogIndex = index - i
-				args.PrevLogTerm = rf.log[index-i].Term
-				args.Entries = rf.log[index-i+1:] // 最后i个entries，i为0的时候为空切片（心跳）
-				reply := AppendEntriesReply{}
-				rf.mu.Unlock()
-				ok, success := rf.sendAppendEntries(server, &args, &reply)
-				if !ok {
-					break
-				} else {
-					if success {
+					ok, success := rf.sendAppendEntries(server, &args, &reply)
+					if !ok {
 						break
+					} else {
+						if success {
+							break
+						}
 					}
 				}
-				time.Sleep(10 * time.Millisecond)
-			}
-		}()
+			}()
+		}
+
 		rf.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
