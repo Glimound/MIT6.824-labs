@@ -10,13 +10,14 @@ import (
 type logTopic string
 
 const (
-	dLeader logTopic = "LEAD"
-	dLog1   logTopic = "LOG1"
-	dTerm   logTopic = "TERM"
-	dTimer  logTopic = "TIMR"
-	dVote   logTopic = "VOTE"
-	dLog2   logTopic = "LOG2"
-	dTest   logTopic = "TEST"
+	dLeader  logTopic = "LEAD"
+	dLog1    logTopic = "LOG1"
+	dTerm    logTopic = "TERM"
+	dTimer   logTopic = "TIMR"
+	dVote    logTopic = "VOTE"
+	dLog2    logTopic = "LOG2"
+	dPersist logTopic = "PERS"
+	dTest    logTopic = "TEST"
 )
 
 const Debug = true
