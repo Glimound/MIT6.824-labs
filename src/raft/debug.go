@@ -10,14 +10,21 @@ import (
 type logTopic string
 
 const (
-	dLeader  logTopic = "LEAD"
-	dLog1    logTopic = "LOG1"
-	dTerm    logTopic = "TERM"
-	dTimer   logTopic = "TIMR"
-	dVote    logTopic = "VOTE"
-	dLog2    logTopic = "LOG2"
-	dPersist logTopic = "PERS"
-	dTest    logTopic = "TEST"
+	dLeader   logTopic = "LEAD"
+	dLog1     logTopic = "LOG1"
+	dTerm     logTopic = "TERM"
+	dTimer    logTopic = "TIMR"
+	dVote     logTopic = "VOTE"
+	dLog2     logTopic = "LOG2"
+	dPersist  logTopic = "PERS"
+	dSnapshot logTopic = "SNAP"
+	dTest     logTopic = "TEST"
+	dError    logTopic = "ERRO"
+)
+
+const (
+	colorRed   = "\033[31m"
+	colorReset = "\033[0m"
 )
 
 const Debug = true
@@ -41,7 +48,11 @@ func DPrintf(topic logTopic, format string, a ...interface{}) {
 		dMu.Unlock()
 		prefix := fmt.Sprintf("%08d %v ", timestamp, topic)
 		format = prefix + format
-		log.Printf(format, a...)
+		if topic == dError {
+			log.Printf(colorRed+format+colorReset, a...)
+		} else {
+			log.Printf(format, a...)
+		}
 	}
 }
 
@@ -56,6 +67,10 @@ func (rf *Raft) DPrintf(topic logTopic, format string, a ...interface{}) {
 		prefix := fmt.Sprintf("%08d %v ", timestamp, topic)
 		format = prefix + format
 		format += fmt.Sprintf("%+v", rf)
-		log.Printf(format, a...)
+		if topic == dError {
+			log.Printf(colorRed+format+colorReset, a...)
+		} else {
+			log.Printf(format, a...)
+		}
 	}
 }

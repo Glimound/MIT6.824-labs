@@ -2,9 +2,9 @@
 # 批量测试脚本
 
 # 测试次数
-num_tests=5
+num_tests=3
 # 测试脚本
-name_test="2C"
+name_test="2B"
 
 count=0
 
