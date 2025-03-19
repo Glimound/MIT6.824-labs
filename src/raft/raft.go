@@ -408,12 +408,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 注意：收到来自term比自己小的leader的心跳，不要重置election timer，防止错误的leader持续工作
-	if args.Term < rf.CurrentTerm {
+	if args.Term < rf.CurrentTerm || rf.getActualIndex(args.PrevLogIndex) < 0 {
 		reply.Success = false
 		DPrintf(dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 	} else if args.PrevLogIndex > rf.getLiteralIndex(len(rf.Log)-1) ||
-		(args.PrevLogIndex != 0 && rf.Log[rf.getActualIndex(args.PrevLogIndex)].Term != args.PrevLogTerm) ||
-		(args.PrevLogIndex == 0 && rf.lastIncludedTerm != args.PrevLogTerm) {
+		(rf.getActualIndex(args.PrevLogIndex) > 0 && rf.Log[rf.getActualIndex(args.PrevLogIndex)].Term != args.PrevLogTerm) ||
+		(rf.getActualIndex(args.PrevLogIndex) == 0 && rf.lastIncludedTerm != args.PrevLogTerm) {
 		// index大于当前日志长度或条目不匹配，则进入该分支，返回false，等待leader重新发送
 		// log为空时：index和term均为0，此时必定成功，不会进入该分支
 		reply.Success = false
@@ -421,7 +421,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if index > len(rf.Log)-1 {
 			index = len(rf.Log) - 1
 		}
-		// find first conflix index
+		// find first conflict index
 		for i := index; i >= 0; i-- {
 			if rf.Log[i].Term != rf.Log[index].Term {
 				reply.ConflictIndex = rf.getLiteralIndex(i + 1)
@@ -444,14 +444,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 判断是否长度超过rf.log（即后面没有其它entries）
 			if rf.getActualIndex(args.PrevLogIndex+1+i) > len(rf.Log)-1 {
 				// 若log后面无其它entries，直接append剩余的entries
-				rf.Log = append(rf.Log, args.Entries[i:]...)
+				// 此处使用深拷贝，而不是使用切片引用，如rf.Log=append(rf.Log,args.Entries[i:]...)
+				// 若使用切片引用，则rf.Log和args.Entries[i:]会指向同一个底层数组，导致竞态
+				entriesToAppend := make([]LogEntry, len(args.Entries[i:]))
+				copy(entriesToAppend, args.Entries[i:])
+				rf.Log = append(rf.Log, entriesToAppend...)
 				break
 			}
 			// 若日志有冲突
 			if rf.Log[rf.getActualIndex(args.PrevLogIndex+1+i)].Term != args.Entries[i].Term {
 				// 删除后面所有的log，并直接append剩余entries
 				rf.Log = rf.Log[:rf.getActualIndex(args.PrevLogIndex+1+i)]
-				rf.Log = append(rf.Log, args.Entries[i:]...)
+				entriesToAppend := make([]LogEntry, len(args.Entries[i:]))
+				copy(entriesToAppend, args.Entries[i:])
+				rf.Log = append(rf.Log, entriesToAppend...)
 				break
 			}
 			// 否则往后遍历，直到找到冲突点或空槽
@@ -675,14 +681,20 @@ func (rf *Raft) sendLogEntries(server int, copyTerm int, index int, wg *sync.Wai
 			args.PrevLogIndex = acceptIndex - 1
 
 			actualIndex := rf.getActualIndex(args.PrevLogIndex)
-			if args.PrevLogIndex == 0 && rf.snapshot != nil {
+			if actualIndex == 0 && rf.snapshot != nil {
 				args.PrevLogTerm = rf.lastIncludedTerm
-				args.Entries = rf.Log[1:rf.getActualIndex(index+1)]
+				entries := rf.Log[1:]
+				args.Entries = make([]LogEntry, len(entries))
+				copy(args.Entries, entries)
 			} else if actualIndex < 0 {
 				// TODO 触发install snapshot
+				rf.mu.Unlock()
+				break
 			} else {
 				args.PrevLogTerm = rf.Log[actualIndex].Term
-				args.Entries = rf.Log[actualIndex+1 : rf.getActualIndex(index+1)]
+				entries := rf.Log[actualIndex+1:]
+				args.Entries = make([]LogEntry, len(entries))
+				copy(args.Entries, entries)
 			}
 
 			args.LeaderCommit = rf.commitIndex
@@ -892,12 +904,18 @@ func (rf *Raft) heartbeatTicker(server int, copyTerm int) {
 					actualIndex := rf.getActualIndex(args.PrevLogIndex)
 					if actualIndex == 0 && rf.snapshot != nil {
 						args.PrevLogTerm = rf.lastIncludedTerm
-						args.Entries = rf.Log[1:] // when normal 为空切片（心跳）
+						// when normal 为空切片（心跳）
+						entries := rf.Log[1:]
+						args.Entries = make([]LogEntry, len(entries))
+						copy(args.Entries, entries)
 					} else if actualIndex < 0 {
 						// TODO 触发install snapshot
 					} else {
 						args.PrevLogTerm = rf.Log[actualIndex].Term
-						args.Entries = rf.Log[actualIndex+1:] // when normal 为空切片（心跳）
+						// when normal 为空切片（心跳）
+						entries := rf.Log[actualIndex+1:]
+						args.Entries = make([]LogEntry, len(entries))
+						copy(args.Entries, entries)
 					}
 					reply := AppendEntriesReply{}
 					rf.mu.Unlock()
@@ -965,6 +983,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// 坑：注意初始化applyCh
 	rf.applyCh = applyCh
 	rf.cond = sync.NewCond(&rf.mu)
+
+	// 2D
+	rf.snapshot = nil
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist()
