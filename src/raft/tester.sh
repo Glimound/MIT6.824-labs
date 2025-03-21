@@ -2,9 +2,9 @@
 # 批量测试脚本
 
 # 测试次数
-num_tests=20
+num_tests=1
 # 测试脚本
-name_test="TestSnapshotBasic2D"
+name_test="2"
 
 count=0
 

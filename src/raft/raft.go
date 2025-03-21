@@ -196,7 +196,32 @@ func (rf *Raft) readPersist() {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	rf.mu.Lock()
+	if lastIncludedIndex < rf.lastIncludedIndex || (lastIncludedIndex >= rf.lastIncludedIndex && lastIncludedTerm < rf.lastIncludedTerm) {
+		DPrintf(dSnapshot, "S%d rejected InstSnap, server: I%d T%d, self: I%d T%d", rf.me, lastIncludedIndex,
+			lastIncludedTerm, rf.lastIncludedIndex, rf.lastIncludedTerm)
+		rf.mu.Unlock()
+		return false
+	}
+	if lastIncludedIndex < rf.getLiteralIndex(len(rf.Log)-1) {
+		DPrintf(dSnapshot, "S%d rejected InstSnap, server: I%d, self: I%d", rf.me, lastIncludedIndex,
+			rf.getLiteralIndex(len(rf.Log)-1))
+		rf.mu.Unlock()
+		return false
+	}
+	rf.Log = make([]LogEntry, 1)
+	rf.snapshot = snapshot
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	rf.lastHeartbeatTime = time.Now()
+	DPrintf(dSnapshot, "S%d accepted InstSnap, new snapshot: I%d T%d", rf.me, lastIncludedIndex, lastIncludedTerm)
 
+	// 持久化状态和快照
+	rf.persistStateAndSnapshot(snapshot)
+
+	rf.mu.Unlock()
 	return true
 }
 
@@ -223,6 +248,82 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.persistStateAndSnapshot(snapshot)
 	DPrintf(dSnapshot, "S%d done snapshot to I%d", rf.me, index)
 
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Snapshot          []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	if args.Term < rf.CurrentTerm {
+		reply.Term = rf.CurrentTerm
+		rf.mu.Unlock()
+		return
+	}
+
+	if args.Term > rf.CurrentTerm {
+		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
+		rf.CurrentTerm = args.Term
+		rf.currentRole = follower
+		rf.Voted = false
+		rf.persist()
+	}
+
+	// 不应该在此处重置心跳超时，错误的snapshot也可能导致timeout重置
+	//rf.lastHeartbeatTime = time.Now()
+	reply.Term = rf.CurrentTerm
+
+	msg := ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      clone(args.Snapshot),
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.mu.Unlock()
+	rf.applyCh <- msg
+	DPrintf(dSnapshot, "S%d received InstSnap", rf.me)
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	DPrintf(dSnapshot, "S%d => S%d Sending InstSnap LII:%d LIT:%d", args.LeaderId, server,
+		args.LastIncludedIndex, args.LastIncludedTerm)
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	if !ok {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.CurrentTerm {
+		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
+		rf.CurrentTerm = reply.Term
+		rf.currentRole = follower
+		rf.lastHeartbeatTime = time.Now()
+		rf.Voted = false
+		rf.persist()
+		return
+	}
+
+	// 只有当仍然是 leader 时才更新 matchIndex 和 nextIndex
+	if rf.currentRole == leader {
+		if rf.matchIndex[server] < args.LastIncludedIndex {
+			rf.matchIndex[server] = args.LastIncludedIndex
+		}
+		if rf.nextIndex[server] <= args.LastIncludedIndex {
+			rf.nextIndex[server] = args.LastIncludedIndex + 1
+		}
+	}
 }
 
 // example RequestVote RPC arguments structure.
@@ -275,7 +376,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		// 若该任期未投票，或已投过给该人（考虑网络请求重复），则下一步判断，否则投拒绝票
 		if !rf.Voted || rf.VotedFor == args.CandidateId {
-			if args.LastLogTerm > rf.Log[len(rf.Log)-1].Term {
+			newestTerm := rf.Log[len(rf.Log)-1].Term
+			if len(rf.Log)-1 == 0 && rf.snapshot != nil {
+				newestTerm = rf.lastIncludedTerm
+			}
+			if args.LastLogTerm > newestTerm {
 				// 投通过票
 				DPrintf(dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 				reply.Term = rf.CurrentTerm
@@ -284,7 +389,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.VotedFor = args.CandidateId
 				// 重置timeout counter
 				rf.lastHeartbeatTime = time.Now()
-			} else if args.LastLogTerm == rf.Log[len(rf.Log)-1].Term {
+			} else if args.LastLogTerm == newestTerm {
 				if args.LastLogIndex >= rf.getLiteralIndex(len(rf.Log)-1) {
 					// 投通过票
 					DPrintf(dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
@@ -687,8 +792,17 @@ func (rf *Raft) sendLogEntries(server int, copyTerm int, index int, wg *sync.Wai
 				args.Entries = make([]LogEntry, len(entries))
 				copy(args.Entries, entries)
 			} else if actualIndex < 0 {
-				// TODO 触发install snapshot
+				// 触发install snapshot
+				ssArgs := InstallSnapshotArgs{
+					Term:              copyTerm,
+					LeaderId:          rf.me,
+					LastIncludedIndex: rf.lastIncludedIndex,
+					LastIncludedTerm:  rf.lastIncludedTerm,
+					Snapshot:          rf.snapshot,
+				}
+				ssReply := InstallSnapshotReply{}
 				rf.mu.Unlock()
+				rf.sendInstallSnapshot(server, &ssArgs, &ssReply)
 				break
 			} else {
 				args.PrevLogTerm = rf.Log[actualIndex].Term
@@ -808,8 +922,13 @@ func (rf *Raft) ticker() {
 					args := RequestVoteArgs{}
 					args.CandidateId = rf.me
 					args.Term = copyTerm // 不能简单地使用rf.CurrentTerm，因为可能已经发生改变
-					args.LastLogIndex = rf.getLiteralIndex(len(rf.Log) - 1)
-					args.LastLogTerm = rf.Log[len(rf.Log)-1].Term
+					if len(rf.Log)-1 == 0 && rf.snapshot != nil {
+						args.LastLogIndex = rf.lastIncludedIndex
+						args.LastLogTerm = rf.lastIncludedTerm
+					} else {
+						args.LastLogIndex = rf.getLiteralIndex(len(rf.Log) - 1)
+						args.LastLogTerm = rf.Log[len(rf.Log)-1].Term
+					}
 					reply := RequestVoteReply{}
 					rf.mu.Unlock()
 					rf.sendRequestVote(index, c, &args, &reply) // 此处不在加锁区内，无需担心call操作耗时
@@ -852,6 +971,7 @@ func (rf *Raft) checkMajority(nodeNum int, c <-chan int, copyTerm int) {
 					rf.nextIndex[i] = rf.getLiteralIndex(len(rf.Log))
 				}
 				rf.matchIndex = make([]int, len(rf.peers))
+				rf.logSending = false
 				// 向所有其他节点定期发送空的AppendEntries RPC（心跳）
 				// leader身份快速转变时（leader -> ? -> leader）会存在两个相同的heartbeat goroutine吗？会，且旧的goroutine
 				// 错误F：leader能且只能因收到更大的term转换为follower，不可能在heartbeat timeout间完成候选与选举
@@ -909,7 +1029,18 @@ func (rf *Raft) heartbeatTicker(server int, copyTerm int) {
 						args.Entries = make([]LogEntry, len(entries))
 						copy(args.Entries, entries)
 					} else if actualIndex < 0 {
-						// TODO 触发install snapshot
+						// 触发install snapshot
+						ssArgs := InstallSnapshotArgs{
+							Term:              copyTerm,
+							LeaderId:          rf.me,
+							LastIncludedIndex: rf.lastIncludedIndex,
+							LastIncludedTerm:  rf.lastIncludedTerm,
+							Snapshot:          rf.snapshot,
+						}
+						ssReply := InstallSnapshotReply{}
+						rf.mu.Unlock()
+						rf.sendInstallSnapshot(server, &ssArgs, &ssReply)
+						break
 					} else {
 						args.PrevLogTerm = rf.Log[actualIndex].Term
 						// when normal 为空切片（心跳）
