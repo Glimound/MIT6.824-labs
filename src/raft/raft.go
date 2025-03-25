@@ -759,7 +759,7 @@ func (rf *Raft) applier() {
 			DPrintf(dLog2, "S%d applied (%v,I%d)", rf.me, msg.Command, msg.CommandIndex)
 			// 快速重试，防止有entries等待apply
 			rf.mu.Unlock()
-			// 此处需要在锁外操作，否则触发snapshot时，snapshot()中获取rf.mu，思索
+			// 此处需要在锁外操作，否则触发snapshot时，snapshot()中获取rf.mu，死锁
 			rf.applyCh <- msg
 			continue
 		}

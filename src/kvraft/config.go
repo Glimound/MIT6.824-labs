@@ -377,6 +377,8 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg.maxraftstate = maxraftstate
 	cfg.start = time.Now()
 
+	DebugInit()
+
 	// create a full set of KV servers.
 	for i := 0; i < cfg.n; i++ {
 		cfg.StartServer(i)
