@@ -24,6 +24,7 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	ClientId  int64
 	RequestId int64
+	CommandId int64
 }
 
 type PutAppendReply struct {
@@ -35,6 +36,7 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	ClientId  int64
 	RequestId int64
+	CommandId int64
 }
 
 type GetReply struct {

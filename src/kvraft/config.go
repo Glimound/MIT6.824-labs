@@ -378,6 +378,7 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	cfg.start = time.Now()
 
 	DebugInit()
+	raft.DebugInit()
 
 	// create a full set of KV servers.
 	for i := 0; i < cfg.n; i++ {

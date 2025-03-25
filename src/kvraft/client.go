@@ -48,6 +48,7 @@ func (ck *Clerk) Get(key string) string {
 		Key:       key,
 		ClientId:  ck.clientId,
 		RequestId: ck.requestId,
+		CommandId: nrand(),
 	}
 	reply := GetReply{}
 
@@ -87,6 +88,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Key:       key,
 		ClientId:  ck.clientId,
 		RequestId: ck.requestId,
+		CommandId: nrand(),
 		Value:     value,
 		Op:        op,
 	}

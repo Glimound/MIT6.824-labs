@@ -19,6 +19,7 @@ type Op struct {
 	Value     string
 	ClientId  int64
 	RequestId int64
+	CommandId int64
 }
 
 type Notification struct {
@@ -36,9 +37,12 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store         map[string]string
-	dupMap        map[int64]int64
-	notifyChanMap map[int]chan Notification
+	store  map[string]string
+	dupMap map[int64]int64
+	// 为什么notifyChanMap不使用index作为key？
+	// 在网络分区时，可能因为log被覆盖导致同一index的log不相同，后覆盖的log apply成功导致被覆盖的指令对应的channel被通知
+	// 可能引发错误的RPC reply
+	notifyChanMap map[int64]chan Notification
 
 	// 为什么不使用set存储id并判断是否重复？
 	// 最后只会有一个server回应RPC，并在回应后将set中对应的entry删除
@@ -57,10 +61,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		Key:       args.Key,
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
+		CommandId: args.CommandId,
 	}
 
 	kv.mu.Lock()
-	index, term, isLeader := kv.rf.Start(op)
+	_, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -70,11 +75,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	DPrintf(dServer, "S%d receive valid Get RPC from C%d, R%d", kv.me, args.ClientId, args.RequestId)
 
 	notifyChan := make(chan Notification, 1)
-	kv.notifyChanMap[index] = notifyChan
+	kv.notifyChanMap[op.CommandId] = notifyChan
 	kv.mu.Unlock()
 
 	// when leader changed (term changed), it should redirect immediately
-	go kv.termDetector(term, index)
+	go kv.termDetector(term, op.CommandId)
 
 	select {
 	case notification := <-notifyChan:
@@ -85,7 +90,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	kv.mu.Lock()
-	delete(kv.notifyChanMap, index)
+	delete(kv.notifyChanMap, op.CommandId)
 	kv.mu.Unlock()
 }
 
@@ -100,6 +105,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Value:     args.Value,
 		ClientId:  args.ClientId,
 		RequestId: args.RequestId,
+		CommandId: args.CommandId,
 	}
 	if args.Op == "Put" {
 		op.Operation = OpPut
@@ -108,7 +114,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	kv.mu.Lock()
-	index, term, isLeader := kv.rf.Start(op)
+	_, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
@@ -118,11 +124,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf(dServer, "S%d receive valid %s RPC from C%d, R%d", kv.me, args.Op, args.ClientId, args.RequestId)
 
 	notifyChan := make(chan Notification, 1)
-	kv.notifyChanMap[index] = notifyChan
+	kv.notifyChanMap[op.CommandId] = notifyChan
 	kv.mu.Unlock()
 
 	// when leader changed (term changed), it should redirect immediately
-	go kv.termDetector(term, index)
+	go kv.termDetector(term, op.CommandId)
 
 	select {
 	case notification := <-notifyChan:
@@ -132,7 +138,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	kv.mu.Lock()
-	delete(kv.notifyChanMap, index)
+	delete(kv.notifyChanMap, op.CommandId)
 	kv.mu.Unlock()
 }
 
@@ -182,7 +188,7 @@ func (kv *KVServer) applier() {
 			DPrintf(dServer, "S%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, msg.CommandIndex,
 				op.RequestId, lastRequestId, op.Operation)
 		}
-		notifyChan, ok := kv.notifyChanMap[msg.CommandIndex]
+		notifyChan, ok := kv.notifyChanMap[op.CommandId]
 		if ok {
 			// 必须使用非阻塞发送，因为RPC处理器可能已经超时
 			select {
@@ -194,10 +200,10 @@ func (kv *KVServer) applier() {
 	}
 }
 
-func (kv *KVServer) termDetector(copyTerm int, index int) {
+func (kv *KVServer) termDetector(copyTerm int, commandId int64) {
 	for !kv.killed() {
 		kv.mu.Lock()
-		notifyChan, exist := kv.notifyChanMap[index]
+		notifyChan, exist := kv.notifyChanMap[commandId]
 		if !exist {
 			kv.mu.Unlock()
 			return
@@ -259,7 +265,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.store = make(map[string]string)
 	kv.dupMap = make(map[int64]int64)
-	kv.notifyChanMap = make(map[int]chan Notification)
+	kv.notifyChanMap = make(map[int64]chan Notification)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 

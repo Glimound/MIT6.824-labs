@@ -2,7 +2,7 @@
 # 批量测试脚本
 
 # 测试次数
-num_tests=1
+num_tests=10
 # 测试脚本
 name_test="3A"
 
