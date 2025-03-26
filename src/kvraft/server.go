@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,12 @@ type Notification struct {
 	value string
 }
 
+type Snapshot struct {
+	Store  map[string]string
+	Index  int
+	DupMap map[int64]int64
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -37,16 +44,20 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store  map[string]string
-	dupMap map[int64]int64
+	store     map[string]string
+	dupMap    map[int64]int64
+	persister *raft.Persister
+
+	// 为什么不使用set存储id并判断是否重复？
+	// 最后只会有一个server回应RPC，并在回应后将set中对应的entry删除
+	// 此时其余的server没法在保证一致性的情况下判断哪些entry已废弃并删除，最终导致内存泄露
+
 	// 为什么notifyChanMap不使用index作为key？
 	// 在网络分区时，可能因为log被覆盖导致同一index的log不相同，后覆盖的log apply成功导致被覆盖的指令对应的channel被通知
 	// 可能引发错误的RPC reply
 	notifyChanMap map[int64]chan Notification
 
-	// 为什么不使用set存储id并判断是否重复？
-	// 最后只会有一个server回应RPC，并在回应后将set中对应的entry删除
-	// 此时其余的server没法在保证一致性的情况下判断哪些entry已废弃并删除，最终导致内存泄露
+	lastAppliedIndex int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -146,6 +157,9 @@ func (kv *KVServer) applier() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		if !msg.CommandValid {
+			if msg.SnapshotValid {
+				kv.installSnapshot(msg)
+			}
 			continue
 		}
 
@@ -176,6 +190,8 @@ func (kv *KVServer) applier() {
 					kv.me, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
 			}
 			kv.dupMap[op.ClientId] = op.RequestId
+			kv.lastAppliedIndex = msg.CommandIndex
+			kv.snapshotTrigger()
 		} else if op.Operation == OpGet {
 			DPrintf(dServer, "S%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, msg.CommandIndex,
 				op.RequestId, lastRequestId, op.Operation)
@@ -200,6 +216,23 @@ func (kv *KVServer) applier() {
 	}
 }
 
+func (kv *KVServer) installSnapshot(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	ok := kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+	if ok {
+		s := bytes.NewBuffer(msg.Snapshot)
+		sd := labgob.NewDecoder(s)
+		var snapshot Snapshot
+		sd.Decode(&snapshot)
+		kv.store = snapshot.Store
+		kv.lastAppliedIndex = snapshot.Index
+		kv.dupMap = snapshot.DupMap
+		DPrintf(dServer, "S%d installed snapshot, snapshot to I%d", kv.me, kv.lastAppliedIndex)
+	}
+}
+
 func (kv *KVServer) termDetector(copyTerm int, commandId int64) {
 	for !kv.killed() {
 		kv.mu.Lock()
@@ -220,6 +253,31 @@ func (kv *KVServer) termDetector(copyTerm int, commandId int64) {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// must be called within lock area
+func (kv *KVServer) snapshotTrigger() {
+	if kv.killed() || kv.maxraftstate < 0 {
+		return
+	}
+
+	if kv.persister.RaftStateSize() <= kv.maxraftstate {
+		return
+	}
+
+	DPrintf(dServer, "S%d Reach snapshot threshold, snapshot to I%d", kv.me, kv.lastAppliedIndex)
+
+	snapshot := Snapshot{
+		Store:  kv.store,
+		Index:  kv.lastAppliedIndex,
+		DupMap: kv.dupMap,
+	}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(snapshot)
+	snapshotBytes := w.Bytes()
+
+	kv.rf.Snapshot(kv.lastAppliedIndex, snapshotBytes)
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -267,10 +325,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.dupMap = make(map[int64]int64)
 	kv.notifyChanMap = make(map[int64]chan Notification)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.lastAppliedIndex = 0
+	if snapshotBytes := persister.ReadSnapshot(); len(snapshotBytes) != 0 {
+		s := bytes.NewBuffer(snapshotBytes)
+		sd := labgob.NewDecoder(s)
+		var snapshot Snapshot
+		sd.Decode(&snapshot)
+		kv.store = snapshot.Store
+		kv.lastAppliedIndex = snapshot.Index
+		kv.dupMap = snapshot.DupMap
+	}
 
 	// You may need initialization code here.
 	go kv.applier()
-	DPrintf(dServer, "Server S%d initiated", me)
+	DPrintf(dServer, "KV Server S%d initiated", me)
 	return kv
 }

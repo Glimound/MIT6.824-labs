@@ -132,6 +132,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.Voted)
 	e.Encode(rf.VotedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	e.Encode(rf.Log)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -144,6 +146,8 @@ func (rf *Raft) persistStateAndSnapshot(snapshot []byte) {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.Voted)
 	e.Encode(rf.VotedFor)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	e.Encode(rf.Log)
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, snapshot)
@@ -177,16 +181,24 @@ func (rf *Raft) readPersist() {
 	var currentTerm int
 	var voted bool
 	var votedFor int
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	var log []LogEntry
-	if d.Decode(&currentTerm) != nil || d.Decode(&voted) != nil ||
-		d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&voted) != nil || d.Decode(&votedFor) != nil ||
+		d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&log) != nil {
 		DPrintf(dPersist, "Read persist error")
 	} else {
 		rf.snapshot = rf.persister.ReadSnapshot()
 		rf.CurrentTerm = currentTerm
 		rf.Voted = voted
 		rf.VotedFor = votedFor
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 		rf.Log = log
+		if len(rf.snapshot) != 0 {
+			rf.commitIndex = lastIncludedIndex
+			rf.lastApplied = lastIncludedIndex
+		}
 		DPrintf(dPersist, "S%d Read persist finished, current term T%d", rf.me, rf.CurrentTerm)
 	}
 }
@@ -1130,6 +1142,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	DPrintf(dBootstrap, "Raft Server S%d initiated", me)
 
 	return rf
 }

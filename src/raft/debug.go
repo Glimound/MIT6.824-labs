@@ -10,16 +10,17 @@ import (
 type logTopic string
 
 const (
-	dLeader   logTopic = "LEAD"
-	dLog1     logTopic = "LOG1"
-	dTerm     logTopic = "TERM"
-	dTimer    logTopic = "TIMR"
-	dVote     logTopic = "VOTE"
-	dLog2     logTopic = "LOG2"
-	dPersist  logTopic = "PERS"
-	dSnapshot logTopic = "SNAP"
-	dTest     logTopic = "TEST"
-	dError    logTopic = "ERRO"
+	dLeader    logTopic = "LEAD"
+	dLog1      logTopic = "LOG1"
+	dTerm      logTopic = "TERM"
+	dTimer     logTopic = "TIMR"
+	dVote      logTopic = "VOTE"
+	dLog2      logTopic = "LOG2"
+	dPersist   logTopic = "PERS"
+	dSnapshot  logTopic = "SNAP"
+	dBootstrap logTopic = "BOOT"
+	dTest      logTopic = "TEST"
+	dError     logTopic = "ERRO"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 	colorReset = "\033[0m"
 )
 
-const Debug = false
+const Debug = true
 
 var debugStart time.Time
 var dMu sync.Mutex
