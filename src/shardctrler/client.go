@@ -12,6 +12,9 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clientId     int64
+	requestId    int64
+	recentLeader int
 }
 
 func nrand() int64 {
@@ -25,77 +28,129 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
+	ck.requestId = 0
+	DPrintf(dClerk, "Clerk initiated, clientId: %d", ck.clientId)
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
+	args := QueryArgs{}
 	// Your code here.
 	args.Num = num
+	args.ClientId = ck.clientId
+	args.RequestId = ck.requestId
+	args.CommandId = nrand()
+	reply := QueryReply{}
+
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+		server := ck.recentLeader
+		for i := 0; i < len(ck.servers); i++ {
+			index := (server + i) % len(ck.servers)
+			DPrintf(dClerk, "Clerk %d sending Query RPC to S%d", ck.clientId, index)
+			ok := ck.servers[index].Call("ShardCtrler.Query", &args, &reply)
+			if !ok || reply.Err == ErrWrongLeader {
+				DPrintf(dClerk, "Query Wrong leader reply from S%d", index)
+				continue
+			}
+			if reply.Err == OK {
+				DPrintf(dClerk, "Query OK reply from S%d", index)
+				ck.recentLeader = index
+				ck.requestId++
 				return reply.Config
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
+	args := JoinArgs{}
 	// Your code here.
 	args.Servers = servers
+	args.ClientId = ck.clientId
+	args.RequestId = ck.requestId
+	args.CommandId = nrand()
+	reply := JoinReply{}
 
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+		server := ck.recentLeader
+		for i := 0; i < len(ck.servers); i++ {
+			index := (server + i) % len(ck.servers)
+			DPrintf(dClerk, "Clerk %d sending Join RPC to S%d", ck.clientId, index)
+			ok := ck.servers[index].Call("ShardCtrler.Join", &args, &reply)
+			if !ok || reply.Err == ErrWrongLeader {
+				DPrintf(dClerk, "Join Wrong leader reply from S%d", index)
+				continue
+			}
+			if reply.Err == OK {
+				DPrintf(dClerk, "Join OK reply from S%d", index)
+				ck.recentLeader = index
+				ck.requestId++
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
+	args := LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
+	args.ClientId = ck.clientId
+	args.RequestId = ck.requestId
+	args.CommandId = nrand()
+	reply := LeaveReply{}
 
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+		server := ck.recentLeader
+		for i := 0; i < len(ck.servers); i++ {
+			index := (server + i) % len(ck.servers)
+			DPrintf(dClerk, "Clerk %d sending Leave RPC to S%d", ck.clientId, index)
+			ok := ck.servers[index].Call("ShardCtrler.Leave", &args, &reply)
+			if !ok || reply.Err == ErrWrongLeader {
+				DPrintf(dClerk, "Leave Wrong leader reply from S%d", index)
+				continue
+			}
+			if reply.Err == OK {
+				DPrintf(dClerk, "Leave OK reply from S%d", index)
+				ck.recentLeader = index
+				ck.requestId++
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
+	args := MoveArgs{}
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+	args.ClientId = ck.clientId
+	args.RequestId = ck.requestId
+	args.CommandId = nrand()
+	reply := MoveReply{}
 
 	for {
-		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+		server := ck.recentLeader
+		for i := 0; i < len(ck.servers); i++ {
+			index := (server + i) % len(ck.servers)
+			DPrintf(dClerk, "Clerk %d sending Move RPC to S%d", ck.clientId, index)
+			ok := ck.servers[index].Call("ShardCtrler.Move", &args, &reply)
+			if !ok || reply.Err == ErrWrongLeader {
+				DPrintf(dClerk, "Move Wrong leader reply from S%d", index)
+				continue
+			}
+			if reply.Err == OK {
+				DPrintf(dClerk, "Move OK reply from S%d", index)
+				ck.recentLeader = index
+				ck.requestId++
 				return
 			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }

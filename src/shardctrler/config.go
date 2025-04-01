@@ -344,6 +344,9 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	cfg.nextClientId = cfg.n + 1000 // client ids start 1000 above the highest serverid
 	cfg.start = time.Now()
 
+	DebugInit()
+	raft.DebugInit()
+
 	// create a full set of KV servers.
 	for i := 0; i < cfg.n; i++ {
 		cfg.StartServer(i)

@@ -679,6 +679,7 @@ func (rf *Raft) logSender() {
 		// 开始复制日志的三个条件：当前是leader，有新条目可以发送，没有正在发送的条目
 		// 任一条件不满足则会等待
 		// 坑：logSending不会转为false：counterChan接收的投票因部分node killed所以始终达不到半数
+		// TODO: fix TestSnapshotInstallUnreliable2D
 		for rf.currentRole != leader || rf.getLiteralIndex(len(rf.Log)-1) <= rf.commitIndex || rf.logSending {
 			rf.cond.Wait()
 			if rf.killed() {
@@ -816,6 +817,11 @@ func (rf *Raft) sendLogEntries(server int, copyTerm int, index int, wg *sync.Wai
 				rf.mu.Unlock()
 				rf.sendInstallSnapshot(server, &ssArgs, &ssReply)
 				break
+				// warning: 存在一种罕见的可能：
+				// S0 leader，S0 -> S1 snapshot, S0 -> S2 send log
+				// 其中S1的branch很快触发wg.done()，S2发送完后也触发c <- 1与wg.done()，但因goroutine调度问题，
+				// 收尾goroutine先于checkCommit()运行，导致channel在被读取前关闭，使得日志成功复制但无法触发leader的commit
+				// 但后续进入的命令会覆盖这一短暂的错误
 			} else {
 				args.PrevLogTerm = rf.Log[actualIndex].Term
 				entries := rf.Log[actualIndex+1:]
