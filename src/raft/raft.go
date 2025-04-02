@@ -679,7 +679,6 @@ func (rf *Raft) logSender() {
 		// 开始复制日志的三个条件：当前是leader，有新条目可以发送，没有正在发送的条目
 		// 任一条件不满足则会等待
 		// 坑：logSending不会转为false：counterChan接收的投票因部分node killed所以始终达不到半数
-		// TODO: fix TestSnapshotInstallUnreliable2D
 		for rf.currentRole != leader || rf.getLiteralIndex(len(rf.Log)-1) <= rf.commitIndex || rf.logSending {
 			rf.cond.Wait()
 			if rf.killed() {
@@ -697,6 +696,7 @@ func (rf *Raft) logSender() {
 			// 此时commit可能已经前进（在commit过半时已经置为false，开始了下一轮复制），则不再置false
 			if copyCommitIndex == rf.commitIndex {
 				rf.logSending = false
+				rf.cond.Broadcast()
 			}
 			rf.mu.Unlock()
 		}(rf.commitIndex)
