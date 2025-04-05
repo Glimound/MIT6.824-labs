@@ -28,6 +28,13 @@ const (
 	colorReset = "\033[0m"
 )
 
+const (
+	DebugRaft        = true  // raft核心包自己的日志
+	DebugKVRaft      = false // kvraft系统使用的raft日志
+	DebugShardCtrler = false // shardctrler系统使用的raft日志
+	DebugShardKV     = false // shardkv系统使用的raft日志
+)
+
 const Debug = true
 
 var debugStart time.Time
@@ -40,10 +47,25 @@ func DebugInit() {
 	dMu.Unlock()
 }
 
+func debugEnable(debugType string) bool {
+	switch debugType {
+	case "raft":
+		return DebugRaft
+	case "kvraft":
+		return DebugKVRaft
+	case "shardctrler":
+		return DebugShardCtrler
+	case "shardkv":
+		return DebugShardKV
+	default:
+		return false
+	}
+}
+
 // 记录/打印日志输出
 // 格式："time(ms) type who what"
-func DPrintf(topic logTopic, format string, a ...interface{}) {
-	if Debug {
+func DPrintf(debugType string, topic logTopic, format string, a ...interface{}) {
+	if Debug && debugEnable(debugType) {
 		dMu.Lock()
 		timestamp := time.Since(debugStart).Milliseconds()
 		dMu.Unlock()
@@ -61,7 +83,7 @@ func DPrintf(topic logTopic, format string, a ...interface{}) {
 // 使用时需保证所有输出语句均加锁
 // 格式："time(ms) type who what {content of rf}"
 func (rf *Raft) DPrintf(topic logTopic, format string, a ...interface{}) {
-	if Debug {
+	if Debug && debugEnable(rf.debugType) {
 		dMu.Lock()
 		timestamp := time.Since(debugStart).Milliseconds()
 		dMu.Unlock()

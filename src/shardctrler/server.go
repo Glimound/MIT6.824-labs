@@ -221,7 +221,7 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	case notification := <-notifyChan:
 		reply.Err = notification.err
 		sc.mu.Lock()
-		if args.Num == -1 || args.Num > len(sc.configs) {
+		if args.Num == -1 || args.Num >= len(sc.configs) {
 			reply.Config = sc.configs[len(sc.configs)-1]
 		} else {
 			reply.Config = sc.configs[args.Num]
@@ -524,6 +524,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
+	sc.rf.SetDebugType("shardctrler")
 
 	// Your code here.
 	sc.dupMap = make(map[int64]int64)

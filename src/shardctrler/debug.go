@@ -21,7 +21,7 @@ const (
 	colorReset = "\033[0m"
 )
 
-const Debug = true
+const Debug = false
 
 var debugStart time.Time
 var dMu sync.Mutex
@@ -40,7 +40,7 @@ func DPrintf(topic logTopic, format string, a ...interface{}) {
 		dMu.Lock()
 		timestamp := time.Since(debugStart).Milliseconds()
 		dMu.Unlock()
-		prefix := fmt.Sprintf("%08d %v ", timestamp, topic)
+		prefix := fmt.Sprintf("%08d %v ", timestamp, "SCT-"+topic)
 		format = prefix + format
 		if topic == dError {
 			log.Printf(colorRed+format+colorReset, a...)
@@ -58,7 +58,7 @@ func (sc *ShardCtrler) DPrintf(topic logTopic, format string, a ...interface{}) 
 		dMu.Lock()
 		timestamp := time.Since(debugStart).Milliseconds()
 		dMu.Unlock()
-		prefix := fmt.Sprintf("%08d %v ", timestamp, topic)
+		prefix := fmt.Sprintf("%08d %v ", timestamp, "SCT-"+topic)
 		format = prefix + format
 		format += fmt.Sprintf("%+v", sc)
 		if topic == dError {
@@ -77,7 +77,7 @@ func (ck *Clerk) DPrintf(topic logTopic, format string, a ...interface{}) {
 		dMu.Lock()
 		timestamp := time.Since(debugStart).Milliseconds()
 		dMu.Unlock()
-		prefix := fmt.Sprintf("%08d %v ", timestamp, topic)
+		prefix := fmt.Sprintf("%08d %v ", timestamp, "SCK-"+topic)
 		format = prefix + format
 		format += fmt.Sprintf("%+v", ck)
 		if topic == dError {

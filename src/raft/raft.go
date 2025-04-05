@@ -101,6 +101,8 @@ type Raft struct {
 	snapshot          []byte // 当前的快照
 	lastIncludedIndex int    // 快照replace的last index
 	lastIncludedTerm  int    // 对应的term
+
+	debugType string
 }
 
 type LogEntry struct {
@@ -137,7 +139,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.Log)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	DPrintf(dPersist, "S%d Persist state finished", rf.me)
+	DPrintf(rf.debugType, dPersist, "S%d Persist state finished", rf.me)
 }
 
 func (rf *Raft) persistStateAndSnapshot(snapshot []byte) {
@@ -151,7 +153,7 @@ func (rf *Raft) persistStateAndSnapshot(snapshot []byte) {
 	e.Encode(rf.Log)
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, snapshot)
-	DPrintf(dPersist, "S%d Persist state and snapshot finished", rf.me)
+	DPrintf(rf.debugType, dPersist, "S%d Persist state and snapshot finished", rf.me)
 }
 
 func (rf *Raft) getActualIndex(literalIndex int) int {
@@ -186,7 +188,7 @@ func (rf *Raft) readPersist() {
 	var log []LogEntry
 	if d.Decode(&currentTerm) != nil || d.Decode(&voted) != nil || d.Decode(&votedFor) != nil ||
 		d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&log) != nil {
-		DPrintf(dPersist, "Read persist error")
+		DPrintf(rf.debugType, dPersist, "Read persist error")
 	} else {
 		rf.snapshot = rf.persister.ReadSnapshot()
 		rf.CurrentTerm = currentTerm
@@ -199,7 +201,7 @@ func (rf *Raft) readPersist() {
 			rf.commitIndex = lastIncludedIndex
 			rf.lastApplied = lastIncludedIndex
 		}
-		DPrintf(dPersist, "S%d Read persist finished, current term T%d", rf.me, rf.CurrentTerm)
+		DPrintf(rf.debugType, dPersist, "S%d Read persist finished, current term T%d", rf.me, rf.CurrentTerm)
 	}
 }
 
@@ -210,13 +212,13 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	if lastIncludedIndex < rf.lastIncludedIndex || (lastIncludedIndex >= rf.lastIncludedIndex && lastIncludedTerm < rf.lastIncludedTerm) {
-		DPrintf(dSnapshot, "S%d rejected InstSnap, server: I%d T%d, self: I%d T%d", rf.me, lastIncludedIndex,
+		DPrintf(rf.debugType, dSnapshot, "S%d rejected InstSnap, server: I%d T%d, self: I%d T%d", rf.me, lastIncludedIndex,
 			lastIncludedTerm, rf.lastIncludedIndex, rf.lastIncludedTerm)
 		rf.mu.Unlock()
 		return false
 	}
 	if lastIncludedIndex < rf.getLiteralIndex(len(rf.Log)-1) {
-		DPrintf(dSnapshot, "S%d rejected InstSnap, server: I%d, self: I%d", rf.me, lastIncludedIndex,
+		DPrintf(rf.debugType, dSnapshot, "S%d rejected InstSnap, server: I%d, self: I%d", rf.me, lastIncludedIndex,
 			rf.getLiteralIndex(len(rf.Log)-1))
 		rf.mu.Unlock()
 		return false
@@ -228,7 +230,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.lastHeartbeatTime = time.Now()
-	DPrintf(dSnapshot, "S%d accepted InstSnap, new snapshot: I%d T%d", rf.me, lastIncludedIndex, lastIncludedTerm)
+	DPrintf(rf.debugType, dSnapshot, "S%d accepted InstSnap, new snapshot: I%d T%d", rf.me, lastIncludedIndex, lastIncludedTerm)
 
 	// 持久化状态和快照
 	rf.persistStateAndSnapshot(snapshot)
@@ -258,7 +260,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapshot = snapshot
 
 	rf.persistStateAndSnapshot(snapshot)
-	DPrintf(dSnapshot, "S%d done snapshot to I%d", rf.me, index)
+	DPrintf(rf.debugType, dSnapshot, "S%d done snapshot to I%d", rf.me, index)
 
 }
 
@@ -283,7 +285,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if args.Term > rf.CurrentTerm {
-		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
+		DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
 		rf.CurrentTerm = args.Term
 		rf.currentRole = follower
 		rf.Voted = false
@@ -303,11 +305,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	rf.mu.Unlock()
 	rf.applyCh <- msg
-	DPrintf(dSnapshot, "S%d received InstSnap", rf.me)
+	DPrintf(rf.debugType, dSnapshot, "S%d received InstSnap", rf.me)
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	DPrintf(dSnapshot, "S%d => S%d Sending InstSnap LII:%d LIT:%d", args.LeaderId, server,
+	DPrintf(rf.debugType, dSnapshot, "S%d => S%d Sending InstSnap LII:%d LIT:%d", args.LeaderId, server,
 		args.LastIncludedIndex, args.LastIncludedTerm)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	if !ok {
@@ -318,7 +320,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	defer rf.mu.Unlock()
 
 	if reply.Term > rf.CurrentTerm {
-		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
+		DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
 		rf.CurrentTerm = reply.Term
 		rf.currentRole = follower
 		rf.lastHeartbeatTime = time.Now()
@@ -367,7 +369,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 处理请求投票逻辑
 	// 若接收到的term比当前的大
 	if args.Term > rf.CurrentTerm {
-		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
+		DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
 		// 设置term并转换为follower
 		rf.CurrentTerm = args.Term
 		rf.currentRole = follower
@@ -380,7 +382,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 投拒绝票
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
-		DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+		DPrintf(rf.debugType, dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 	} else {
 		// 等于的情况（可能为转换而来的相等，或是原本就相等）
 		// 对于term相等的情况的讨论：若当前为follower，不影响；
@@ -394,7 +396,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 			if args.LastLogTerm > newestTerm {
 				// 投通过票
-				DPrintf(dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+				DPrintf(rf.debugType, dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 				reply.Term = rf.CurrentTerm
 				reply.VoteGranted = true
 				rf.Voted = true
@@ -404,7 +406,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			} else if args.LastLogTerm == newestTerm {
 				if args.LastLogIndex >= rf.getLiteralIndex(len(rf.Log)-1) {
 					// 投通过票
-					DPrintf(dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+					DPrintf(rf.debugType, dVote, "S%d Granting vote to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 					reply.Term = rf.CurrentTerm
 					reply.VoteGranted = true
 					rf.Voted = true
@@ -415,19 +417,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 					// 投拒绝票
 					reply.Term = rf.CurrentTerm
 					reply.VoteGranted = false
-					DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+					DPrintf(rf.debugType, dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 				}
 			} else {
 				// 投拒绝票
 				reply.Term = rf.CurrentTerm
 				reply.VoteGranted = false
-				DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+				DPrintf(rf.debugType, dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 			}
 		} else {
 			// 投拒绝票
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = false
-			DPrintf(dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
+			DPrintf(rf.debugType, dVote, "S%d Deny voting to S%d at T%d", rf.me, args.CandidateId, rf.CurrentTerm)
 		}
 	}
 	rf.persist()
@@ -469,7 +471,7 @@ func (rf *Raft) sendRequestVote(server int, c chan<- int, args *RequestVoteArgs,
 		// 处理接收投票逻辑
 		// 若接收到的term比当前的大
 		if reply.Term > rf.CurrentTerm {
-			DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
+			DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
 			// 设置term并转换为follower
 			rf.CurrentTerm = reply.Term
 			rf.currentRole = follower
@@ -480,7 +482,7 @@ func (rf *Raft) sendRequestVote(server int, c chan<- int, args *RequestVoteArgs,
 		rf.mu.Unlock()
 		// 若接收到有效投票
 		if reply.VoteGranted {
-			DPrintf(dTerm, "S%d <- S%d Got vote for T%d", rf.me, server, args.Term)
+			DPrintf(rf.debugType, dTerm, "S%d <- S%d Got vote for T%d", rf.me, server, args.Term)
 			// 向counterChan中发送信号
 			c <- 1
 		}
@@ -513,21 +515,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 若接收到的term比当前的大（对于candidate，则是大于等于）
 	if args.Term > rf.CurrentTerm {
 		// 设置term并转换为follower
-		DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
+		DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, args.Term, rf.CurrentTerm)
 		rf.CurrentTerm = args.Term
 		rf.currentRole = follower
 		rf.Voted = false
 		rf.persist()
 	} else if rf.currentRole == candidate && args.Term == rf.CurrentTerm {
 		// 转换为follower
-		DPrintf(dVote, "S%d Find existing leader, converting to follower", rf.me)
+		DPrintf(rf.debugType, dVote, "S%d Find existing leader, converting to follower", rf.me)
 		rf.currentRole = follower
 	}
 
 	// 注意：收到来自term比自己小的leader的心跳，不要重置election timer，防止错误的leader持续工作
 	if args.Term < rf.CurrentTerm || rf.getActualIndex(args.PrevLogIndex) < 0 {
 		reply.Success = false
-		DPrintf(dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
+		DPrintf(rf.debugType, dTimer, "S%d receive invalid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 	} else if args.PrevLogIndex > rf.getLiteralIndex(len(rf.Log)-1) ||
 		(rf.getActualIndex(args.PrevLogIndex) > 0 && rf.Log[rf.getActualIndex(args.PrevLogIndex)].Term != args.PrevLogTerm) ||
 		(rf.getActualIndex(args.PrevLogIndex) == 0 && rf.lastIncludedTerm != args.PrevLogTerm) {
@@ -549,11 +551,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if reply.ConflictIndex == 0 {
 			reply.ConflictIndex = 1
 		}
-		DPrintf(dTimer, "S%d receive mismatched AppEnt from S%d, T%d, conflictIndex: %d", rf.me, args.LeaderId, args.Term, reply.ConflictIndex)
+		DPrintf(rf.debugType, dTimer, "S%d receive mismatched AppEnt from S%d, T%d, conflictIndex: %d", rf.me, args.LeaderId, args.Term, reply.ConflictIndex)
 		rf.lastHeartbeatTime = time.Now()
 	} else {
 		reply.Success = true
-		DPrintf(dTimer, "S%d receive valid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
+		DPrintf(rf.debugType, dTimer, "S%d receive valid AppEnt from S%d, T%d", rf.me, args.LeaderId, args.Term)
 		rf.lastHeartbeatTime = time.Now()
 		// 无论是否有entries（是否是心跳），都进入该循环，判断并复制日志
 		for i := range args.Entries {
@@ -580,7 +582,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// 否则往后遍历，直到找到冲突点或空槽
 		}
 		if len(args.Entries) != 0 {
-			DPrintf(dLog2, "S%d new log: %s", rf.me, EntriesToString(rf.Log))
+			DPrintf(rf.debugType, dLog2, "S%d new log: %s", rf.me, EntriesToString(rf.Log))
 			rf.persist()
 		}
 	}
@@ -592,7 +594,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = rf.getLiteralIndex(len(rf.Log) - 1)
 		}
-		DPrintf(dLog2, "S%d change commitIndex to I%d", rf.me, rf.commitIndex)
+		DPrintf(rf.debugType, dLog2, "S%d change commitIndex to I%d", rf.me, rf.commitIndex)
 	}
 	reply.Term = rf.CurrentTerm
 	rf.mu.Unlock()
@@ -601,7 +603,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // 发送AppendEntries RPC并处理回复（Leader）
 // 返回值：ok, success
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) (bool, bool) {
-	DPrintf(dLog1, "S%d -> S%d Sending AppEnt PLI:%d PLT:%d LC:%d - [%s]",
+	DPrintf(rf.debugType, dLog1, "S%d -> S%d Sending AppEnt PLI:%d PLT:%d LC:%d - [%s]",
 		rf.me, server, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, EntriesToString(args.Entries))
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	success := false
@@ -611,7 +613,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		// 若接收到的term比当前的大
 		if reply.Term > rf.CurrentTerm {
 			// 设置term并转换为follower
-			DPrintf(dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
+			DPrintf(rf.debugType, dTerm, "S%d Find bigger term (%d>%d), converting to follower", rf.me, reply.Term, rf.CurrentTerm)
 			rf.CurrentTerm = reply.Term
 			rf.currentRole = follower
 			rf.lastHeartbeatTime = time.Now()
@@ -658,10 +660,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.currentRole == leader
 
 	if isLeader {
-		DPrintf(dLog1, "S%d receive new command (%v) at, I%d", rf.me, command, index)
+		DPrintf(rf.debugType, dLog1, "S%d receive new command (%v) at, I%d", rf.me, command, index)
 		entry := LogEntry{command, term}
 		rf.Log = append(rf.Log, entry)
-		DPrintf(dLog2, "S%d new log: %s", rf.me, EntriesToString(rf.Log))
+		DPrintf(rf.debugType, dLog2, "S%d new log: %s", rf.me, EntriesToString(rf.Log))
 		rf.persist()
 		rf.cond.Broadcast()
 	}
@@ -705,7 +707,7 @@ func (rf *Raft) logSender() {
 		index := rf.getLiteralIndex(len(rf.Log) - 1)
 		copyTerm := rf.CurrentTerm
 
-		DPrintf(dLog1, "S%d start replicating entry at I%d", rf.me, index)
+		DPrintf(rf.debugType, dLog1, "S%d start replicating entry at I%d", rf.me, index)
 
 		// 创建用于goroutine间通信的channel；创建WaitGroup，以使所有操作完成后关闭channel
 		counterChan := make(chan int, len(rf.peers))
@@ -746,7 +748,7 @@ func (rf *Raft) checkCommit(nodeNum int, c <-chan int, index int) {
 			if index > rf.commitIndex {
 				rf.commitIndex = index
 			}
-			DPrintf(dLog2, "S%d change commitIndex to I%d", rf.me, rf.commitIndex)
+			DPrintf(rf.debugType, dLog2, "S%d change commitIndex to I%d", rf.me, rf.commitIndex)
 			rf.logSending = false
 			rf.cond.Broadcast()
 			rf.mu.Unlock()
@@ -769,7 +771,7 @@ func (rf *Raft) applier() {
 				CommandIndex: nextApplyIndex,
 			}
 			rf.lastApplied = nextApplyIndex
-			DPrintf(dLog2, "S%d applied (%v,I%d)", rf.me, msg.Command, msg.CommandIndex)
+			DPrintf(rf.debugType, dLog2, "S%d applied (%v,I%d)", rf.me, msg.Command, msg.CommandIndex)
 			// 快速重试，防止有entries等待apply
 			rf.mu.Unlock()
 			// 此处需要在锁外操作，否则触发snapshot时，snapshot()中获取rf.mu，死锁
@@ -917,7 +919,7 @@ func (rf *Raft) ticker() {
 		// 重置计时器
 		rf.lastHeartbeatTime = time.Now()
 
-		DPrintf(dTimer, "S%d Election timeout, become candidate for T%d", rf.me, rf.CurrentTerm)
+		DPrintf(rf.debugType, dTimer, "S%d Election timeout, become candidate for T%d", rf.me, rf.CurrentTerm)
 
 		// 保存currentTerm的副本
 		tmpTerm := rf.CurrentTerm
@@ -931,7 +933,7 @@ func (rf *Raft) ticker() {
 		go rf.checkMajority(len(rf.peers), counterChan, tmpTerm)
 
 		// 向所有其他节点发送请求投票RPC
-		DPrintf(dVote, "S%d Requesting vote", rf.me)
+		DPrintf(rf.debugType, dVote, "S%d Requesting vote", rf.me)
 		for i := range rf.peers {
 			if i != rf.me {
 				go func(copyTerm int, c chan<- int, index int) {
@@ -981,7 +983,7 @@ func (rf *Raft) checkMajority(nodeNum int, c <-chan int, copyTerm int) {
 			// 若选举结果出来后还是当前任期
 			if copyTerm == rf.CurrentTerm {
 				// 转换为leader，且无需修改voted（任期没变）
-				DPrintf(dLeader, "S%d Achieved majority for T%d (%d), converting to leader", rf.me, rf.CurrentTerm, counter)
+				DPrintf(rf.debugType, dLeader, "S%d Achieved majority for T%d (%d), converting to leader", rf.me, rf.CurrentTerm, counter)
 				rf.currentRole = leader
 				// 初始化nextIndex和matchIndex
 				rf.nextIndex = make([]int, len(rf.peers))
@@ -1100,6 +1102,10 @@ func (rf *Raft) heartbeatTicker(server int, copyTerm int) {
 	}
 }
 
+func (rf *Raft) SetDebugType(debugType string) {
+	rf.debugType = debugType
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -1117,6 +1123,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+
+	rf.SetDebugType("raft")
 
 	// 2A
 	rf.CurrentTerm = 0
@@ -1149,7 +1157,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
-	DPrintf(dBootstrap, "Raft Server S%d initiated", me)
+	DPrintf(rf.debugType, dBootstrap, "Raft Server S%d initiated", me)
 
 	return rf
 }

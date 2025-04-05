@@ -327,6 +327,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.persister = persister
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf.SetDebugType("kvraft")
 
 	kv.lastAppliedIndex = 0
 	if snapshotBytes := persister.ReadSnapshot(); len(snapshotBytes) != 0 {
