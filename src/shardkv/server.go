@@ -320,19 +320,16 @@ func (kv *ShardKV) applier() {
 				} else {
 					notification.err = ErrNoKey
 				}
-				//DPrintf(dServer, "S%d G%d done Get operation, log I%d, R%d, current key: %s, current value: %s",
-				//	kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-				DPrintf(dServer, "S%d G%d done Get operation, log I%d, R%d", kv.me, kv.gid, msg.CommandIndex, op.RequestId)
+				DPrintf(dServer, "S%d G%d done Get operation, log I%d, R%d, current key: %s, current value: %s",
+					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
 			case OpPut:
 				kv.store[op.Key] = op.Value
-				//DPrintf(dServer, "S%d G%d done Put operation, log I%d, R%d, current key: %s, current value: %s",
-				//	kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-				DPrintf(dServer, "S%d G%d done Put operation, log I%d, R%d", kv.me, kv.gid, msg.CommandIndex, op.RequestId)
+				DPrintf(dServer, "S%d G%d done Put operation, log I%d, R%d, current key: %s, current value: %s",
+					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
 			case OpAppend:
 				kv.store[op.Key] = kv.store[op.Key] + op.Value
-				//DPrintf(dServer, "S%d G%d done Append operation, log I%d, R%d, current key: %s, current value: %s",
-				//	kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-				DPrintf(dServer, "S%d G%d done Append operation, log I%d, R%d", kv.me, kv.gid, msg.CommandIndex, op.RequestId)
+				DPrintf(dServer, "S%d G%d done Append operation, log I%d, R%d, current key: %s, current value: %s",
+					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
 			}
 			kv.dupMap[op.ClientId] = op.RequestId
 			kv.lastAppliedIndex = msg.CommandIndex
@@ -516,9 +513,9 @@ func (kv *ShardKV) FetchShards(fetchArgs *FetchShardsArgs, fetchReply *FetchShar
 
 	DPrintf(dServer, "S%d G%d sending shards %v for config %d", kv.me, kv.gid, fetchArgs.ShardIndex, fetchArgs.ConfigNum)
 
-	fetchReply.ShardsChanged = fetchArgs.ShardIndex
+	fetchReply.ShardsChanged = clone(fetchArgs.ShardIndex)
 	fetchReply.Store = extractStore(kv.store, fetchArgs.ShardIndex)
-	fetchReply.DupMap = kv.dupMap
+	fetchReply.DupMap = cloneDupMap(kv.dupMap)
 	fetchReply.Err = OK
 }
 
@@ -601,6 +598,36 @@ func (kv *ShardKV) FetchDone(doneArgs *FetchDoneArgs, doneReply *FetchDoneReply)
 		RequestId:     doneArgs.RequestId,
 	})
 	doneReply.Err = OK
+}
+
+// 若crash重启后，snapshot后无其余log（无法向后重放log以触发RPC），且snapshot包含的shardStates不全为serving，
+// 此时系统会处于活锁状态，无法向前推进
+// crash重启后，检测未恢复的shardStates，重新发送fetchShards RPC
+func (kv *ShardKV) resumeFetch() {
+	shardsToFetch := make(map[int][]int) // gid -> shardIndex
+
+	kv.mu.Lock()
+	for i := 0; i < shardctrler.NShards; i++ {
+		if kv.shardStates[i] == Fetching {
+			targetGid := kv.lastConfig.Shards[i]
+			shardsToFetch[targetGid] = append(shardsToFetch[targetGid], i)
+		}
+	}
+	kv.mu.Unlock()
+	if len(shardsToFetch) == 0 {
+		return
+	}
+
+	for retry := 0; retry < 10; retry++ {
+		if !kv.isLeader() {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		DPrintf(dServer, "S%d G%d resume fetching shards, needs to fetch shards for config %d, shardsMap: %v",
+			kv.me, kv.gid, kv.config.Num, shardsToFetch)
+		go kv.fetchShardsSender(shardsToFetch, kv.config.Num)
+		return
+	}
 }
 
 func extractStore(src map[string]string, shardsChanged []int) map[string]string {
@@ -830,6 +857,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.applier()
 	go kv.configDetector()
+	go kv.resumeFetch()
 	DPrintf(dServer, "SKV Server S%d G%d initiated", me, gid)
 	return kv
 }
