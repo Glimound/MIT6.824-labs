@@ -312,39 +312,52 @@ func (kv *ShardKV) applier() {
 		}
 
 		// 需要去重及回调的op
-		if !duplicate {
-			switch op.Operation {
-			case OpGet:
+		shard := key2shard(op.Key)
+		validShard := false
+		if kv.config.Num > 0 {
+			if currentGid := kv.config.Shards[shard]; currentGid == kv.gid {
+				if kv.shardStates[shard] == Serving {
+					validShard = true
+				}
+			}
+		}
+		if !validShard {
+			notification.err = ErrWrongGroup
+		} else {
+			if !duplicate {
+				switch op.Operation {
+				case OpGet:
+					if value, ok := kv.store[op.Key]; ok {
+						notification.value = value
+					} else {
+						notification.err = ErrNoKey
+					}
+					DPrintf(dServer, "S%d G%d done Get operation, log I%d, R%d, current key: %s, current value: %s",
+						kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
+				case OpPut:
+					kv.store[op.Key] = op.Value
+					DPrintf(dServer, "S%d G%d done Put operation, log I%d, R%d, current key: %s, current value: %s",
+						kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
+				case OpAppend:
+					kv.store[op.Key] = kv.store[op.Key] + op.Value
+					DPrintf(dServer, "S%d G%d done Append operation, log I%d, R%d, current key: %s, current value: %s",
+						kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
+				}
+				kv.dupMap[op.ClientId] = op.RequestId
+				kv.lastAppliedIndex = msg.CommandIndex
+				kv.snapshotTrigger()
+			} else if op.Operation == OpGet {
+				DPrintf(dServer, "S%d G%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, kv.gid, msg.CommandIndex,
+					op.RequestId, lastRequestId, op.Operation)
 				if value, ok := kv.store[op.Key]; ok {
 					notification.value = value
 				} else {
 					notification.err = ErrNoKey
 				}
-				DPrintf(dServer, "S%d G%d done Get operation, log I%d, R%d, current key: %s, current value: %s",
-					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-			case OpPut:
-				kv.store[op.Key] = op.Value
-				DPrintf(dServer, "S%d G%d done Put operation, log I%d, R%d, current key: %s, current value: %s",
-					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-			case OpAppend:
-				kv.store[op.Key] = kv.store[op.Key] + op.Value
-				DPrintf(dServer, "S%d G%d done Append operation, log I%d, R%d, current key: %s, current value: %s",
-					kv.me, kv.gid, msg.CommandIndex, op.RequestId, op.Key, kv.store[op.Key])
-			}
-			kv.dupMap[op.ClientId] = op.RequestId
-			kv.lastAppliedIndex = msg.CommandIndex
-			kv.snapshotTrigger()
-		} else if op.Operation == OpGet {
-			DPrintf(dServer, "S%d G%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, kv.gid, msg.CommandIndex,
-				op.RequestId, lastRequestId, op.Operation)
-			if value, ok := kv.store[op.Key]; ok {
-				notification.value = value
 			} else {
-				notification.err = ErrNoKey
+				DPrintf(dServer, "S%d G%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, kv.gid, msg.CommandIndex,
+					op.RequestId, lastRequestId, op.Operation)
 			}
-		} else {
-			DPrintf(dServer, "S%d G%d find duplicate log I%d, R%d <= %d, operation: %d", kv.me, kv.gid, msg.CommandIndex,
-				op.RequestId, lastRequestId, op.Operation)
 		}
 		notifyChan, ok := kv.notifyChanMap[op.CommandId]
 		if ok {

@@ -2,7 +2,7 @@
 # 批量测试脚本
 
 # 测试次数
-num_tests=1
+num_tests=2
 
 count=0
 
@@ -13,7 +13,7 @@ do
     echo -ne "Running test $i of $num_tests...\r"
 
     # 运行测试并将输出保存到变量中
-    output=$(go test -run TestUnreliable3 -race)
+    output=$(go test -race)
 
     # 通过grep搜索"FAIL"
     if echo "$output" | grep -q "FAIL"; then
